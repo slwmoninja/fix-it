@@ -27,7 +27,7 @@
 // free-tier quotas, so a busy key can get "high demand" on every single call,
 // not just an occasional spike. Retrying the same model won't help with that.
 // Fall back through progressively more available models instead.
-const MODEL_CHAIN = ['gemini-3.5-flash', 'gemini-2.5-flash-lite'];
+const MODEL_CHAIN = ['gemini-3.5-flash', 'gemini-3.1-flash-lite'];
 const RETRY_DELAYS_MS = [1000, 2000];
 
 function isRetryableGeminiError(status, message) {
