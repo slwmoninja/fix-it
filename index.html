@@ -1535,11 +1535,10 @@ function renderProject(projectId){
 
   // Purchase list
   const pl=cur?.purchaseList;
-  const selectedCount=(pl?.products||[]).filter(i=>i.selected).length+(pl?.tools||[]).filter(i=>i.selected).length;
   const purchaseHtml=(pl&&(pl.products?.length||pl.tools?.length))?`
     <div class="card">
       <div class="card-title">🛒 Help Me Purchase</div>
-      <p style="font-size:12px;color:var(--text-light);margin-bottom:11px;">Check the items you still need, then compare prices near you — or tap 🛒 on any item for a quick price check.</p>
+      <p style="font-size:12px;color:var(--text-light);margin-bottom:11px;">Check the items you still need, then tap 🛒 on any item for a quick price check.</p>
       ${pl.products?.length?`
         <div style="font-size:12px;font-weight:700;color:var(--text-light);text-transform:uppercase;margin-bottom:7px;">📦 Products</div>
         ${pl.products.map((item,i)=>`
@@ -1564,10 +1563,6 @@ function renderProject(projectId){
             <div class="chk-cost">${esc(item.estimatedCost||'')}</div>
             <button class="price-btn" onclick="findBestPrice('${esc(item.name)}')" aria-label="Find best price" title="Find best price">🛒</button>
           </div>`).join('')}`:''}
-      <div class="divider" style="margin-top:11px;"></div>
-      <button class="btn btn-outline" style="margin-top:11px;font-size:13px;" onclick="compareSelectedPrices('${p.id}')">
-        🛒 Compare Prices${selectedCount?` for ${selectedCount} Selected`:''}
-      </button>
     </div>`:'';
 
   // Steps
@@ -1875,18 +1870,6 @@ function findBestPrice(name){
   const gl=s.country&&s.country!=='OTHER'?s.country:'';
   window.open(shopSearchUrl(name,loc,gl),'_blank');
 }
-function compareSelectedPrices(pid){
-  const ps=getProjects();const p=ps.find(x=>x.id===pid);
-  const pl=p&&p.chosenPath&&p.pathData?.[p.chosenPath]?.purchaseList;
-  if(!pl)return;
-  const items=[...(pl.products||[]),...(pl.tools||[])].filter(i=>i.selected);
-  if(!items.length){showToast('Check off items above to compare their prices');return;}
-  const s=getSettings();
-  const loc=[s.region,resolveCountryLabel(s)].filter(Boolean).join(' ');
-  const gl=s.country&&s.country!=='OTHER'?s.country:'';
-  items.forEach(item=>window.open(shopSearchUrl(item.name,loc,gl),'_blank'));
-}
-
 // ═══════════════════════════════════════
 //  HISTORY
 // ═══════════════════════════════════════
