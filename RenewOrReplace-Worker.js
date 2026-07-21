@@ -142,7 +142,15 @@ export default {
       const geminiBody = {
         contents: [{ parts }],
         generationConfig: {
-          maxOutputTokens: body.max_tokens || 8192
+          maxOutputTokens: body.max_tokens || 8192,
+          // This asks for a single structured JSON object, not open-ended
+          // reasoning, so thinking is turned off entirely (budget 0) rather
+          // than just hidden — otherwise the model's reasoning tokens eat
+          // into maxOutputTokens and can leak into the answer as plain text
+          // on thinking-capable models (breaks the app's JSON.parse of the
+          // response). includeThoughts:false is kept as a defensive backup
+          // in case a future model can't fully disable thinking.
+          thinkingConfig: { thinkingBudget: 0, includeThoughts: false }
         }
       };
 
@@ -157,7 +165,10 @@ export default {
 
       const upstreamData = result.data;
 
+      // Defense-in-depth: drop any part explicitly marked as a thought, even
+      // though thinkingConfig above should prevent them from appearing at all.
       const text = (upstreamData.candidates?.[0]?.content?.parts || [])
+        .filter(p => !p.thought)
         .map(p => p.text || '').join('');
 
       if (!text) {
