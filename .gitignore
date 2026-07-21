@@ -1,0 +1,15 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local source copy + backup + unused design assets (all imagery is embedded as base64 in index.html)
+RenewOrReplace.html
+RenewOrReplace.html.bak
+Gemini_Generated_Image_aofcsiaofcsiaofc.png
+Home2.png
+Home2_transparent.png
+HomeIcon.png
+icon-history.png
+icon-home.png
+icon-new.png
+icon-settings.png
