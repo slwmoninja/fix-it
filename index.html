@@ -487,8 +487,7 @@ select.set-input{appearance:none;-webkit-appearance:none;background-image:url("d
 
     <div class="set-item">
       <div class="set-label">Error Log</div>
-      <p style="font-size:12px;color:var(--text-light);margin-bottom:10px;">Most recent app error, saved on this device so you can copy and share it for debugging.</p>
-      <div id="errorLogList"></div>
+      <div id="errorLogList" style="margin-top:10px;"></div>
       <div style="display:flex;gap:8px;margin-top:10px;">
         <button class="btn btn-secondary btn-sm" onclick="copyErrorLog()">📋 Copy</button>
         <button class="btn btn-outline btn-sm" onclick="clearErrorLog()">🗑 Clear Log</button>
@@ -497,8 +496,7 @@ select.set-input{appearance:none;-webkit-appearance:none;background-image:url("d
 
     <div class="set-item">
       <div class="set-label">Backup &amp; Restore</div>
-      <p style="font-size:12px;color:var(--text-light);margin-bottom:10px;">Your projects are already auto-saved on this device as you go. This makes a separate exportable copy for the one thing auto-save can't survive: deliberately clearing your browser's history/site data.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;">
         <button class="btn btn-secondary btn-sm" onclick="runBackupNow()">💾 Back up now</button>
         <button class="btn btn-outline btn-sm" onclick="openBackupRestorePicker()">📂 Restore from backup</button>
       </div>
