@@ -1,0 +1,6 @@
+#!/bin/sh
+# Keeps manifest.json's (and index.html's apple-touch-icon) icon URLs
+# stamped with a content hash whenever the icon files change, so installed
+# PWAs' home screen icons actually update. See scripts/sync_icon_version.py.
+
+python3 "$(git rev-parse --show-toplevel)/scripts/sync_icon_version.py" || exit 1
