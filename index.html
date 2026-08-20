@@ -2781,18 +2781,40 @@ async function tryAutoRestorePathA(){
     return true;
   }catch(e){ return false; }
 }
+// Path B — prompt-first fallback, every other case (iOS Safari, most Android
+// Chrome, non-Chromium desktop — i.e. no Exit App Backup snapshot found by
+// Path A0 and no granted File System Access handle for Path A). Nothing can
+// be silently read here without a user gesture, so the proactive prompt
+// itself is the ask: tapping "Restore backup" goes straight into the same
+// manual open-file-picker flow the Settings "Restore" button uses
+// (openBackupRestorePicker -> importLatestBackupFromFiles/importDataFromFile),
+// which already does its own validate-then-merge via applyImportedData.
+// Always "succeeds" (returns true) once shown, since unlike Path A0/A there's
+// no silent data to check ahead of time — the point is just to surface the
+// nudge instead of leaving the app looking silently reset.
+function tryAutoRestorePathB(){
+  const wrap = openInfoModal('Restore from a backup?', `
+    <div style="margin-bottom:14px;">This device's project data looks empty. If you have a backup file saved, you can restore it now.</div>
+    <button class="btn btn-primary" id="auto-restore-b-yes" style="margin-bottom:8px;">Restore backup</button>
+    <button class="btn btn-outline" id="auto-restore-b-no">No, start fresh</button>
+  `);
+  wrap.querySelector('#auto-restore-b-yes').addEventListener('click', ()=>{ wrap.remove(); openBackupRestorePicker(); });
+  wrap.querySelector('#auto-restore-b-no').addEventListener('click', ()=>wrap.remove());
+  return true;
+}
 // Proactively offers to restore when this app's own on-device data looks
 // freshly wiped but a prior backup is still reachable. Tries Path A0 (the
-// Exit App Backup — works silently on every platform) first, then falls
-// back to Path A (a previously-granted File System Access handle, desktop
-// Chrome/Edge only). There's currently no Path B (plain-download-fallback
-// browsers, e.g. iOS Safari/most Android Chrome, without ever having
-// granted a save-file handle) — the manual "Restore" button in Settings/
-// onboarding remains the way in for that case.
+// Exit App Backup — works silently on every platform) first, then Path A (a
+// previously-granted File System Access handle, desktop Chrome/Edge only),
+// then falls through to Path B (prompt-first fallback) for every other
+// browser — most phones, and any desktop that's never granted a save-file
+// handle — so an empty-looking app always at least nudges toward the manual
+// Restore flow instead of doing nothing.
 async function maybeOfferAutoRestore(){
   if(getProjects().length>0) return false; // real on-device data exists — never prompt over it
   if(await tryAutoRestorePathA0()) return true;
-  return await tryAutoRestorePathA();
+  if(await tryAutoRestorePathA()) return true;
+  return tryAutoRestorePathB();
 }
 
 // ═══════════════════════════════════════
