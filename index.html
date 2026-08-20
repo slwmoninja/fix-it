@@ -2584,13 +2584,91 @@ async function runBackupNow(){
   const wrote = await runAutoBackupDownload();
   showToast(wrote ? 'Backup saved.' : 'Already up to date — no changes since last backup.');
 }
+
+/* ---- Exit App Backup — a silent, app-owned safety net, entirely separate
+   from the manual "Back up now" above. Overwrites ONE fixed IndexedDB
+   record on every backgrounding (visibilitychange -> hidden, plus pagehide
+   as a redundant second trigger) — never a new record per exit, and no UI
+   at all. Exists to survive an app-level bug or storage corruption between
+   real manual backups; the user never sees it directly except as a
+   candidate source for the restore-on-empty-state flow (Path A0, see
+   tryAutoRestorePathA0() below) — no settings row, no button, no filename. ---- */
+const EXIT_BACKUP_DB = 'fixit-exit-backup', EXIT_BACKUP_STORE = 'snapshot', EXIT_BACKUP_KEY = 'latest';
+const EXIT_BACKUP_LAST_FINGERPRINT_KEY = 'fixit_last_exit_backup_fingerprint';
+function openExitBackupDb(){
+  return new Promise((resolve, reject)=>{
+    const req = indexedDB.open(EXIT_BACKUP_DB, 1);
+    req.onupgradeneeded = ()=>{ req.result.createObjectStore(EXIT_BACKUP_STORE); };
+    req.onsuccess = ()=>resolve(req.result);
+    req.onerror = ()=>reject(req.error);
+  });
+}
+// Skips the write when nothing's changed since the last exit backup (same
+// fingerprint technique as backupFingerprint() above) — not required for
+// correctness (the fixed key already prevents pile-up regardless), just
+// avoids a pointless IndexedDB write on every tab-switch/background cycle.
+async function writeExitBackup(){
+  const fp = backupFingerprint();
+  if(fp === localStorage.getItem(EXIT_BACKUP_LAST_FINGERPRINT_KEY)) return false;
+  try{
+    const db = await openExitBackupDb();
+    await new Promise((resolve, reject)=>{
+      const tx = db.transaction(EXIT_BACKUP_STORE, 'readwrite');
+      tx.objectStore(EXIT_BACKUP_STORE).put(JSON.stringify(buildBackupPayload()), EXIT_BACKUP_KEY);
+      tx.oncomplete = resolve; tx.onerror = ()=>reject(tx.error);
+    });
+    localStorage.setItem(EXIT_BACKUP_LAST_FINGERPRINT_KEY, fp);
+    return true;
+  }catch(e){ return false; } // best-effort/silent — nothing to surface a failure to at exit time
+}
+async function readExitBackup(){
+  try{
+    const db = await openExitBackupDb();
+    return await new Promise((resolve, reject)=>{
+      const req = db.transaction(EXIT_BACKUP_STORE, 'readonly').objectStore(EXIT_BACKUP_STORE).get(EXIT_BACKUP_KEY);
+      req.onsuccess = ()=>resolve(req.result||null);
+      req.onerror = ()=>reject(req.error);
+    });
+  }catch(e){ return null; }
+}
+// Wired exactly once at bootstrap (see the DOMContentLoaded handler at the
+// bottom of this file) — these listeners live on document/window, never
+// rebuilt by renderHome()/renderHistory()/renderSettings(), so rewiring them
+// from anywhere that re-runs would accumulate duplicate listeners the same
+// way Step 6's backup-button bug once could (see the comment above
+// runBackupNow). visibilitychange->hidden is the primary trigger (the page
+// is still fully alive when it fires, giving the async IndexedDB write a
+// real chance to finish); pagehide is a redundant second trigger since
+// coverage of what actually fires differs across mobile OSes. Deliberately
+// no beforeunload: unreliable on mobile Safari and disqualifies the page
+// from the back-forward cache in Chromium/Firefox for every normal
+// tab-switch.
+function initExitBackup(){
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='hidden') writeExitBackup();
+  });
+  window.addEventListener('pagehide', ()=>{ writeExitBackup(); });
+}
+
 function isValidBackupShape(parsed){
   return !!(parsed && typeof parsed==='object' && Array.isArray(parsed.projects));
 }
-// Backing logic for both the manual Restore button and the auto-detected
-// restore prompt (maybeOfferAutoRestore) — merges onto whatever's already
-// on device rather than assuming an empty slate, and confirms before
-// overwriting unless the caller already confirmed (skipConfirm).
+// Shared by the manual Restore button (importDataFromFile below) and the
+// auto-detected restore prompt (offerAutoRestore, Path A0/Path A) — one
+// validate-then-merge implementation, not two. Merges onto whatever's
+// already on device rather than assuming an empty slate.
+function applyImportedData(parsed){
+  saveProjects(parsed.projects || []);
+  saveSettings(Object.assign({}, getSettings(), parsed.settings || {}));
+  if(Array.isArray(parsed.errorLog)) saveErrorLog(parsed.errorLog);
+  document.querySelectorAll('.info-modal-backdrop').forEach(m=>m.remove());
+  document.getElementById('deleteConfirmModal')?.remove();
+  document.getElementById('onboardOverlay')?.classList.remove('active');
+  renderHome(); renderHistory(); renderSettings();
+}
+// Backing logic for the manual Restore button — parses/validates the file,
+// confirms before overwriting unless the caller already confirmed
+// (skipConfirm), then hands off to applyImportedData().
 async function importDataFromFile(file, opts){
   opts = opts || {};
   if(!file) return;
@@ -2599,13 +2677,7 @@ async function importDataFromFile(file, opts){
     const parsed = JSON.parse(text);
     if(!isValidBackupShape(parsed)) throw new Error('This file does not look like a Renew or Replace backup.');
     if(!opts.skipConfirm && !confirm('This will replace all current data on this device with the contents of the imported file. Continue?')) return;
-    saveProjects(parsed.projects || []);
-    saveSettings(Object.assign({}, getSettings(), parsed.settings || {}));
-    if(Array.isArray(parsed.errorLog)) saveErrorLog(parsed.errorLog);
-    document.querySelectorAll('.info-modal-backdrop').forEach(m=>m.remove());
-    document.getElementById('deleteConfirmModal')?.remove();
-    document.getElementById('onboardOverlay')?.classList.remove('active');
-    renderHome(); renderHistory(); renderSettings();
+    applyImportedData(parsed);
     showToast('Data imported.');
   }catch(e){
     showToast('Could not import that file: '+e.message);
@@ -2660,16 +2732,42 @@ async function openBackupRestorePicker(){
   }
   document.getElementById('restoreFileInput').click();
 }
-// Proactively offers to restore when this app's own on-device data looks
-// freshly wiped but a prior backup is still reachable — only meaningful on
-// the File System Access API (the plain-download fallback can't be
-// silently re-read without the user picking a file again). Only queries
-// permission, never requests it — there's no user gesture yet this early in
-// the page lifecycle, and forcing that request would throw up a blocking
-// native permission prompt on every fresh load until answered.
-async function maybeOfferAutoRestore(){
+// Shared popup for both auto-restore paths below — reuses the same
+// validate-then-merge logic as the manual Restore button (applyImportedData)
+// rather than duplicating it a second time here.
+function offerAutoRestore(parsed, lastModified){
+  const wrap = openInfoModal('Load latest backup?', `
+    <div style="margin-bottom:14px;">Found ${parsed.projects.length} saved project${parsed.projects.length===1?'':'s'} from a previous backup on this device${lastModified?` (${fmtDateTime(lastModified)})`:''}. Load it now?</div>
+    <button class="btn btn-primary" id="auto-restore-yes" style="margin-bottom:8px;">Yes, load backup</button>
+    <button class="btn btn-outline" id="auto-restore-no">No</button>
+  `);
+  wrap.querySelector('#auto-restore-yes').addEventListener('click', ()=>{ wrap.remove(); applyImportedData(parsed); showToast('Data imported.'); });
+  wrap.querySelector('#auto-restore-no').addEventListener('click', ()=>wrap.remove());
+}
+// Path A0 — Step 6b's Exit App Backup, checked first, every platform. A
+// plain IndexedDB read needs no permission and no user gesture on any
+// platform (unlike Path A below), so this is what actually makes silent
+// restore possible on mobile, where the File System Access API doesn't
+// exist at all. Also the freshest silent source, since it's kept current on
+// every backgrounding rather than only whenever the user last tapped "Back
+// up now".
+async function tryAutoRestorePathA0(){
+  try{
+    const json = await readExitBackup();
+    if(!json) return false;
+    const parsed = JSON.parse(json);
+    if(!isValidBackupShape(parsed) || !parsed.projects.length) return false;
+    offerAutoRestore(parsed, null);
+    return true;
+  }catch(e){ return false; }
+}
+// Path A — silent handle re-read, File System Access API browsers only
+// (desktop Chrome/Edge). Only queries permission, never requests it —
+// there's no user gesture yet this early in the page lifecycle, and forcing
+// that request would throw up a blocking native permission prompt on every
+// fresh load until answered.
+async function tryAutoRestorePathA(){
   if(!window.showSaveFilePicker) return false;
-  if(getProjects().length>0) return false; // real on-device data exists — never prompt over it
   try{
     const handle = await loadSavedBackupHandle();
     if(!handle) return false;
@@ -2679,15 +2777,22 @@ async function maybeOfferAutoRestore(){
     const text = await file.text();
     const parsed = JSON.parse(text);
     if(!isValidBackupShape(parsed) || !parsed.projects.length) return false;
-    const wrap = openInfoModal('Load latest backup?', `
-      <div style="margin-bottom:14px;">Found ${parsed.projects.length} saved project${parsed.projects.length===1?'':'s'} from a previous backup on this device (${fmtDateTime(file.lastModified)}). Load it now?</div>
-      <button class="btn btn-primary" id="auto-restore-yes" style="margin-bottom:8px;">Yes, load backup</button>
-      <button class="btn btn-outline" id="auto-restore-no">No</button>
-    `);
-    wrap.querySelector('#auto-restore-yes').addEventListener('click', ()=>{ wrap.remove(); importDataFromFile(file, {skipConfirm:true}); });
-    wrap.querySelector('#auto-restore-no').addEventListener('click', ()=>wrap.remove());
+    offerAutoRestore(parsed, file.lastModified);
     return true;
   }catch(e){ return false; }
+}
+// Proactively offers to restore when this app's own on-device data looks
+// freshly wiped but a prior backup is still reachable. Tries Path A0 (the
+// Exit App Backup — works silently on every platform) first, then falls
+// back to Path A (a previously-granted File System Access handle, desktop
+// Chrome/Edge only). There's currently no Path B (plain-download-fallback
+// browsers, e.g. iOS Safari/most Android Chrome, without ever having
+// granted a save-file handle) — the manual "Restore" button in Settings/
+// onboarding remains the way in for that case.
+async function maybeOfferAutoRestore(){
+  if(getProjects().length>0) return false; // real on-device data exists — never prompt over it
+  if(await tryAutoRestorePathA0()) return true;
+  return await tryAutoRestorePathA();
 }
 
 // ═══════════════════════════════════════
@@ -2705,6 +2810,7 @@ document.addEventListener('DOMContentLoaded',async ()=>{
   refreshInstallUI();
   checkForUpdate();
   checkStoragePersistence();
+  initExitBackup(); // wired exactly once — see the comment on initExitBackup() itself
   // Resolves the "data looks freshly wiped, but a prior backup is still
   // reachable" case first (it's about not losing data) — only then offers
   // the proactive install ask, so the two never compete for attention on
