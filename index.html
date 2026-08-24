@@ -773,11 +773,15 @@ function saveProjects(p){
       showToast('Could not save — storage is full. Delete old projects and try again.');
     }
   }
+  // scheduleExitBackup() (defined near EXIT APP BACKUP below — hoisted, so
+  // this forward reference is safe) debounces a refresh of the Step 6b
+  // safety-net snapshot after every real save, not just at app close.
+  scheduleExitBackup();
 }
 function getSettings(){
   try{return JSON.parse(localStorage.getItem('fixit_settings')||'{}');}catch{return{};}
 }
-function saveSettings(s){localStorage.setItem('fixit_settings',JSON.stringify(s));}
+function saveSettings(s){localStorage.setItem('fixit_settings',JSON.stringify(s)); scheduleExitBackup();}
 function genId(){return Date.now().toString(36)+Math.random().toString(36).substr(2);}
 
 // ═══════════════════════════════════════
@@ -2587,12 +2591,32 @@ async function runBackupNow(){
 
 /* ---- Exit App Backup — a silent, app-owned safety net, entirely separate
    from the manual "Back up now" above. Overwrites ONE fixed IndexedDB
-   record on every backgrounding (visibilitychange -> hidden, plus pagehide
-   as a redundant second trigger) — never a new record per exit, and no UI
-   at all. Exists to survive an app-level bug or storage corruption between
-   real manual backups; the user never sees it directly except as a
-   candidate source for the restore-on-empty-state flow (Path A0, see
-   tryAutoRestorePathA0() below) — no settings row, no button, no filename. ---- */
+   record — never a new record per exit, and no UI at all. Exists to survive
+   an app-level bug or storage corruption between real manual backups; the
+   user never sees it directly except as a candidate source for the
+   restore-on-empty-state flow (Path A0, see tryAutoRestorePathA0() below) —
+   no settings row, no button, no filename.
+
+   Originally this only wrote at backgrounding (visibilitychange->hidden,
+   pagehide). Real gap found and fixed 2026-08-24 (rHabbits, confirmed on
+   Android — same bug here since this is the same code): async IndexedDB
+   work started inside those handlers is racing the OS, not guaranteed to
+   finish. Per Chrome's own Page Lifecycle API guidance
+   (developer.chrome.com/docs/web-platform/page-lifecycle-api), once a
+   backgrounded page moves from hidden to frozen, "freezable tasks in the
+   page's task queues are suspended" — an in-flight transaction's default
+   auto-commit-on-idle can simply never get to run, silently dropping the
+   write with no error to catch. Two changes:
+   1. scheduleExitBackup() (called from saveProjects()/saveSettings() above)
+      now debounces a refresh on every real save, not just at exit — by the
+      time backgrounding actually happens, the snapshot is typically already
+      near-current from an earlier checkpoint instead of depending on one
+      risky just-in-time write racing the freeze.
+   2. writeExitBackup() now calls tx.commit() (feature-detected — Safari/iOS
+      doesn't support it, silently falls back to the prior behavior there)
+      right after the put(), forcing an immediate commit attempt instead of
+      waiting on the browser's own idle-detection heuristic, which is
+      exactly the mechanism the freeze race can cut off. ---- */
 const EXIT_BACKUP_DB = 'fixit-exit-backup', EXIT_BACKUP_STORE = 'snapshot', EXIT_BACKUP_KEY = 'latest';
 const EXIT_BACKUP_LAST_FINGERPRINT_KEY = 'fixit_last_exit_backup_fingerprint';
 function openExitBackupDb(){
@@ -2615,11 +2639,25 @@ async function writeExitBackup(){
     await new Promise((resolve, reject)=>{
       const tx = db.transaction(EXIT_BACKUP_STORE, 'readwrite');
       tx.objectStore(EXIT_BACKUP_STORE).put(JSON.stringify(buildBackupPayload()), EXIT_BACKUP_KEY);
+      // Force an immediate commit attempt rather than waiting for the
+      // browser's default auto-commit-on-idle — see this section's header
+      // comment. Feature-detected: Safari/iOS has no IDBTransaction.commit(),
+      // so this is a no-op there and the transaction still auto-commits the
+      // old way, same as before this fix on that platform specifically.
+      if(typeof tx.commit==='function') tx.commit();
       tx.oncomplete = resolve; tx.onerror = ()=>reject(tx.error);
     });
     localStorage.setItem(EXIT_BACKUP_LAST_FINGERPRINT_KEY, fp);
     return true;
   }catch(e){ return false; } // best-effort/silent — nothing to surface a failure to at exit time
+}
+// Debounced trigger called from saveProjects()/saveSettings() above (every
+// real state mutation) — collapses rapid-fire saves into one write shortly
+// after things settle, rather than hammering IndexedDB repeatedly.
+let exitBackupDebounceId = null;
+function scheduleExitBackup(){
+  if(exitBackupDebounceId) clearTimeout(exitBackupDebounceId);
+  exitBackupDebounceId = setTimeout(()=>{ exitBackupDebounceId = null; writeExitBackup(); }, 500);
 }
 async function readExitBackup(){
   try{
@@ -2637,17 +2675,22 @@ async function readExitBackup(){
 // from anywhere that re-runs would accumulate duplicate listeners the same
 // way Step 6's backup-button bug once could (see the comment above
 // runBackupNow). visibilitychange->hidden is the primary trigger (the page
-// is still fully alive when it fires, giving the async IndexedDB write a
-// real chance to finish); pagehide is a redundant second trigger since
-// coverage of what actually fires differs across mobile OSes. Deliberately
-// no beforeunload: unreliable on mobile Safari and disqualifies the page
-// from the back-forward cache in Chromium/Firefox for every normal
-// tab-switch.
+// is still fully alive when it fires); pagehide is a redundant second
+// trigger since coverage of what actually fires differs across mobile OSes.
+// Deliberately no beforeunload: unreliable on mobile Safari and disqualifies
+// the page from the back-forward cache in Chromium/Firefox for every normal
+// tab-switch. Both handlers write immediately, bypassing any pending
+// scheduleExitBackup() debounce — this is the "about to disappear" moment
+// and shouldn't be delayed further.
 function initExitBackup(){
+  function writeNow(){
+    if(exitBackupDebounceId){ clearTimeout(exitBackupDebounceId); exitBackupDebounceId=null; }
+    writeExitBackup();
+  }
   document.addEventListener('visibilitychange', ()=>{
-    if(document.visibilityState==='hidden') writeExitBackup();
+    if(document.visibilityState==='hidden') writeNow();
   });
-  window.addEventListener('pagehide', ()=>{ writeExitBackup(); });
+  window.addEventListener('pagehide', writeNow);
 }
 
 function isValidBackupShape(parsed){
