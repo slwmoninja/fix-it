@@ -299,6 +299,14 @@ select.set-input{appearance:none;-webkit-appearance:none;background-image:url("d
   border:1px solid var(--border);box-shadow:none;font-weight:600;}
 .topbar-install-btn.hidden{display:none;}
 
+/* ── Settings-only "reset install status" escape hatch for a stale
+   installed flag surviving a real Home Screen uninstall (localStorage isn't
+   cleared by an OS-level uninstall). See resetInstallStatus(). ── */
+.reset-install-link{display:block;width:100%;margin-top:10px;padding:0;
+  background:none;border:none;color:var(--primary);font-size:12px;
+  text-decoration:underline;text-align:left;cursor:pointer;}
+.reset-install-link.hidden{display:none;}
+
 /* ── Generic centered info/confirm popup — install/uninstall steps, the
    proactive install-prompt ask, and the auto-detected restore ask all reuse
    this rather than a position-anchored tooltip (which runs off-screen for a
@@ -506,6 +514,11 @@ select.set-input{appearance:none;-webkit-appearance:none;background-image:url("d
       <div style="display:flex;justify-content:space-between;font-size:13px;">
         <span style="color:var(--text-light);">Version</span><span id="aboutVersion" style="font-weight:600;"></span>
       </div>
+      <!-- Only shown when the persisted "installed" flag looks stale (not
+           running standalone, but the flag says installed) -- e.g. after a
+           real Home Screen uninstall, which doesn't clear localStorage.
+           See resetInstallStatus()/refreshInstallUI(). -->
+      <button class="reset-install-link hidden" id="resetInstallStatusBtn" onclick="resetInstallStatus()">Not on your Home Screen? Reset install status</button>
     </div>
 
     <p style="text-align:center;padding:18px;color:var(--text-light);font-size:12px;">Renew or Replace · All data stored locally on your device</p>
@@ -2195,6 +2208,21 @@ function refreshInstallUI(){
   });
   const vEl = document.getElementById('aboutVersion');
   if(vEl) vEl.textContent = APP_VERSION;
+  // Settings-only escape hatch for a stale "installed" flag: the page can't
+  // tell the difference between "legitimately installed, just viewing in a
+  // tab" and "flag survived a real Home Screen uninstall" on its own --
+  // beforeinstallprompt (above) self-heals this the next time it fires, but
+  // that can be a while. This link lets the user fix it immediately.
+  const resetBtn = document.getElementById('resetInstallStatusBtn');
+  if(resetBtn){
+    const staleFlagLikely = !isStandaloneApp() && localStorage.getItem(INSTALL_PROMPT_ACCEPTED_KEY)==='1';
+    resetBtn.classList.toggle('hidden', !staleFlagLikely);
+  }
+}
+function resetInstallStatus(){
+  localStorage.removeItem(INSTALL_PROMPT_ACCEPTED_KEY);
+  refreshInstallUI();
+  showToast('Install status reset — tap Install to add it again.');
 }
 
 // Chrome/Edge/Android fire this instead of installing immediately, handing
@@ -2206,6 +2234,14 @@ let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', e=>{
   e.preventDefault();
   deferredInstallPrompt = e;
+  // Chrome only fires this event when it believes the app is NOT currently
+  // installed for this origin -- that's the one reliable signal that a
+  // persisted "installed" flag is stale (e.g. the user really did uninstall
+  // from the Home Screen, which doesn't clear localStorage for the origin).
+  // Drop it here so the real Install flow takes back over immediately.
+  if(localStorage.getItem(INSTALL_PROMPT_ACCEPTED_KEY)==='1'){
+    localStorage.removeItem(INSTALL_PROMPT_ACCEPTED_KEY);
+  }
   refreshInstallUI();
 });
 window.addEventListener('appinstalled', ()=>{
